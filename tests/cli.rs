@@ -30,6 +30,28 @@ fn run_cli(args: &[&str], stdin: &str) -> (i32, String, String) {
     )
 }
 
+/// Spawn the installed/debug binary in a given cwd with piped stdio.
+fn spawn_in_dir(cwd: &std::path::Path, args: &[&str]) -> std::process::Child {
+    Command::new(bin())
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .current_dir(cwd)
+        .spawn()
+        .expect("spawn shellaborate")
+}
+
+fn write_stdin(child: &mut std::process::Child, stdin: &str) {
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+}
+
 #[test]
 fn help_and_version() {
     let (code, out, _) = run_cli(&["--help"], "");
@@ -110,20 +132,8 @@ fn git_diff_stat_parsing() {
     assert!(git(&["add", "."]).status.success());
 
     let req = r#"{"steps":[{"cmd":"git diff --cached --stat"}]}"#;
-    let mut child = Command::new(bin())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .current_dir(repo)
-        .spawn()
-        .unwrap();
-    use std::io::Write;
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(req.as_bytes())
-        .unwrap();
+    let mut child = spawn_in_dir(repo, &[]);
+    write_stdin(&mut child, req);
     let out = child.wait_with_output().unwrap();
     assert!(
         out.status.success(),
@@ -146,8 +156,8 @@ fn git_diff_stat_parsing() {
 fn gh_failure_surfaces_cleanly() {
     // gh pointed at a dead loopback host via step.env (the sanitized child env
     // only inherits an allowlist, so test overrides ride in step.env). Must
-    // exit non-zero, emit valid JSON with ok=false, never panic. Loopback only
-    // — no external network in tests.
+    // exit non-zero, emit valid JSON with ok=false, and never panic or dump a
+    // stacktrace. Loopback only — no external network in tests.
     let req = r#"{"steps":[{"cmd":"gh api user","env":{"GH_CONFIG_DIR":"/tmp","GH_HOST":"localhost:1"}}]}"#;
     let mut child = Command::new(bin())
         .stdin(Stdio::piped())
@@ -449,20 +459,11 @@ fn capture_flag_collects_artifacts() {
     // Step writes two files; --capture collects them with sha256 + inline.
     let dir = tempfile::tempdir().unwrap();
     let req = r#"{"steps":[{"cmd":"echo build ok > out.txt && echo v1 > out.ver"}]}"#;
-    let mut child = Command::new(bin())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .current_dir(dir.path())
-        .spawn()
-        .unwrap();
-    use std::io::Write;
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(req.as_bytes())
-        .unwrap();
+    let mut child = spawn_in_dir(
+        dir.path(),
+        &["--capture", "out.txt", "--capture", "out.ver"],
+    );
+    write_stdin(&mut child, req);
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{stdout}");
@@ -486,21 +487,8 @@ fn capture_json_field_and_cli_flag_merge() {
     let dir = tempfile::tempdir().unwrap();
     let req =
         r#"{"steps":[{"cmd":"echo a > f1.txt && echo b > f2.txt"}],"capture":[{"path":"f1.txt"}]}"#;
-    let mut child = Command::new(bin())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .current_dir(dir.path())
-        .args(["--capture", "f2.txt"])
-        .spawn()
-        .unwrap();
-    use std::io::Write;
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(req.as_bytes())
-        .unwrap();
+    let mut child = spawn_in_dir(dir.path(), &["--capture", "f2.txt"]);
+    write_stdin(&mut child, req);
     let out = child.wait_with_output().unwrap();
     let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
     let arts = v["artifacts"].as_array().unwrap();
@@ -520,20 +508,8 @@ fn capture_works_on_failed_batch() {
     // The whole point: failed run still returns the log for debugging.
     let dir = tempfile::tempdir().unwrap();
     let req = r#"{"steps":[{"cmd":"echo step1 > ok.log"},{"cmd":"exit 5"}],"capture":[{"path":"ok.log"}]}"#;
-    let mut child = Command::new(bin())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .current_dir(dir.path())
-        .spawn()
-        .unwrap();
-    use std::io::Write;
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(req.as_bytes())
-        .unwrap();
+    let mut child = spawn_in_dir(dir.path(), &[]);
+    write_stdin(&mut child, req);
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(1), "step failure exits 1");
     let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
@@ -543,5 +519,4 @@ fn capture_works_on_failed_batch() {
         .expect("artifacts present on failed batch");
     assert_eq!(arts.len(), 1);
     assert_eq!(arts[0]["content"], serde_json::json!("step1\n"));
-    }
 }
