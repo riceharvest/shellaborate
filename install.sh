@@ -1,7 +1,7 @@
 #!/bin/sh
 # recurlsively installer — POSIX, fail-closed.
 # Usage: curl -fsSL https://raw.githubusercontent.com/riceharvest/recurlsively/main/install.sh | sh
-# Override version: SHELLABORATE_VERSION=v0.2.0 sh install.sh
+# Override version: SHELLABORATE_VERSION=v0.3.0 sh install.sh
 set -eu
 
 REPO="riceharvest/shellaborate"

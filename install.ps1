@@ -1,6 +1,6 @@
 # recurlsively installer for Windows — fail-closed.
 # Usage: irm https://raw.githubusercontent.com/riceharvest/shellaborate/main/install.ps1 | iex
-# Override version: $env:SHELLABORATE_VERSION = "v0.1.0"
+# Override version: $env:SHELLABORATE_VERSION = "v0.3.0"
 $ErrorActionPreference = "Stop"
 
 $Repo = "riceharvest/shellaborate"
