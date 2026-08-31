@@ -1,6 +1,6 @@
 [package]
 name = "shellaborate"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Batch shell: terminal + git + gh + execute_code + process in one DAG (terminal->terminal 71.9%, 99k). Pure Rust."
@@ -26,6 +26,8 @@ serde_json = "1"
 anyhow = "1"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+clap_mangen = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls","gzip","http2","json"] }
 sha2 = "0.10"
 url = "2.5"
@@ -33,6 +35,9 @@ flate2 = "1"
 tar = "0.4"
 
 tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
