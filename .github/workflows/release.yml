@@ -75,6 +75,7 @@ jobs:
           mkdir -p "$DIR"
           cp "target/${{ matrix.target }}/release/${{ env.BIN }}" "$DIR/"
           cp README.md LICENSE-MIT "$DIR/"
+          "target/${{ matrix.target }}/release/${{ env.BIN }}" --emit hermes-tool.json > "$DIR/hermes-tool.json"
           tar czf "${DIR}.tar.gz" "$DIR"
           sha256sum "${DIR}.tar.gz" | tee "artifact-sha256-${{ matrix.target }}.txt"
 
@@ -87,6 +88,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$dir" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ env.BIN }}.exe" "$dir/"
           Copy-Item README.md, LICENSE-MIT "$dir/"
+          & "target/${{ matrix.target }}/release/${{ env.BIN }}.exe" --emit hermes-tool.json | Out-File -Encoding utf8 "$dir/hermes-tool.json"
           Compress-Archive -Path "$dir" -DestinationPath "$dir.zip"
           (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower() + "  $dir.zip" | Out-File -Encoding ascii "artifact-sha256-${{ matrix.target }}.txt"
 

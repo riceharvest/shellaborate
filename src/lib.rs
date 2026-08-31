@@ -248,6 +248,14 @@ fn segments(cmd: &str) -> Vec<String> {
 
 /// Return Some(reason) if any segment matches the denylist.
 pub fn dangerous_reason(cmd: &str) -> Option<String> {
+    // Forkbomb: the signature `X(){ ... :|:& ... };` spans shell metacharacters,
+    // so segment splitting destroys it. Check the whole command first.
+    let squash: String = cmd.chars().filter(|c| !c.is_whitespace()).collect();
+    if let (Some(open), Some(close)) = (squash.find("(){"), squash.rfind('}')) {
+        if close > open + 3 && squash[open + 3..close].contains(":|:&") {
+            return Some("forkbomb".into());
+        }
+    }
     for seg in segments(cmd) {
         let t = seg.trim();
         if t.is_empty() {
@@ -276,8 +284,16 @@ pub fn dangerous_reason(cmd: &str) -> Option<String> {
             }
             _ => {}
         }
-        if t.contains(":(){ :|:& };:") {
-            return Some("forkbomb".into());
+        // Forkbomb: the body is `:(){ :|:& };:` with arbitrary spacing. Match
+        // on the signature shape rather than one exact string: an fn-like
+        // `NAME(){ ... :|:& ... } ;` definition. Rough but catches the
+        // canonical variants and obfuscated spacing.
+        if let (Some(open), Some(close)) = (t.find("(){"), t.rfind('}')) {
+            let body = &t[open + 3..close];
+            let no_space: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+            if no_space.contains(":|:&") {
+                return Some("forkbomb".into());
+            }
         }
     }
     None

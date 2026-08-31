@@ -281,3 +281,163 @@ fn timeout_reports_structured() {
     assert_eq!(r["exit"], serde_json::json!(-1));
     assert_eq!(r["timeout"], serde_json::json!(true));
 }
+
+// ---------- adversarial audit (5 probes) ----------
+
+#[test]
+fn audit_forkbomb_denied_by_denylist() {
+    // Literal forkbomb in several spacing variants must be denied pre-exec.
+    for cmd in [
+        ":(){ :|:& };:",
+        ":(){:|:&};:",
+        ":(){:|: &};:",
+        "echo x && bash -c \":(){ :|:& };:\"",
+    ] {
+        let req = serde_json::json!({ "steps": [{ "cmd": cmd }] }).to_string();
+        let (code, out, _) = run_cli(&[], &req);
+        assert_eq!(code, 2, "forkbomb {cmd:?} must be denied: {out}");
+        assert!(out.contains("forkbomb"), "reason surfaced: {out}");
+    }
+    // --allow-dangerous override accepts the request (shell may then reject
+    // the syntax, but the tool itself must not refuse).
+    let req = r#"{"steps":[{"cmd":":(){ :|:& };:","timeout_ms":3000}]}"#;
+    let (code, _, _) = run_cli(&["--allow-dangerous"], req);
+    assert_ne!(code, 2, "override must bypass the denylist");
+}
+
+#[test]
+fn audit_secret_env_does_not_leak() {
+    // GH_TOKEN injected via step.env then echoed: output must be masked.
+    let req =
+        r#"{"steps":[{"cmd":"echo token=$GH_TOKEN","env":{"GH_TOKEN":"ghp_SUPERSECRET123456"}}]}"#;
+    let (code, out, _) = run_cli(&[], req);
+    assert_eq!(code, 0);
+    assert!(!out.contains("ghp_SUPERSECRET"), "secret leaked: {out}");
+    assert!(out.contains("§§§§§§§§"), "mask marker present: {out}");
+    // Also as command text in output capture.
+    let req = r#"{"steps":[{"cmd":"env | grep -c GH_TOKEN || true; echo GH_TOKEN=zzz"}]}"#;
+    let (_, out, _) = run_cli(&[], req);
+    assert!(out.contains("§§§§§§§§"), "echoed key name masked: {out}");
+}
+
+#[test]
+fn audit_secret_env_is_sanitized() {
+    // Ambient env is NOT inherited: a secret in the parent environment must
+    // not reach the step unless explicitly passed via step.env.
+    let req = r#"{"steps":[{"cmd":"printenv GH_TOKEN | wc -c"}]}"#;
+    let mut child = Command::new(bin())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("GH_TOKEN", "ghp_AMBIENTSECRET000000")
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(req.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("ghp_AMBIENTSECRET"),
+        "ambient leak: {stdout}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    // wc -c on empty input prints 0 (no newline) => "0\n"
+    assert_eq!(v["results"][0]["stdout"], serde_json::json!("0\n"), "{v}");
+}
+
+#[test]
+fn audit_cwd_escape_rejected_both_ways() {
+    // Explicit cwd with traversal.
+    let req = r#"{"steps":[{"cmd":"pwd","cwd":"../../"}]}"#;
+    let (code, out, _) = run_cli(&[], req);
+    assert_eq!(code, 1);
+    assert!(out.contains("path traversal rejected"), "{out}");
+    // Traversal smuggled through a cd prefix (normalized into cwd).
+    let req = r#"{"steps":[{"cmd":"cd ../../../etc && head -1 passwd"}]}"#;
+    let (code, out, _) = run_cli(&[], req);
+    assert_eq!(code, 1);
+    assert!(out.contains("path traversal rejected"), "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v["results"][0]["stdout"].is_null(), "never executed: {v}");
+}
+
+#[test]
+fn audit_output_dos_capped() {
+    // 10MB flood must be capped at 5MiB + one read chunk, flagged, and the
+    // process must stay small (no OOM).
+    let req = r#"{"steps":[{"cmd":"yes | head -c 10M","timeout_ms":15000}]}"#;
+    let (code, out, _) = run_cli(&[], req);
+    assert_eq!(code, 0, "the command itself succeeds: {out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let r = &v["results"][0];
+    assert_eq!(r["stdout_truncated"], serde_json::json!(true), "{out}");
+    let len = r["stdout"].as_str().unwrap().len();
+    assert!(len <= 5 * 1024 * 1024 + 8192, "captured {len} bytes");
+}
+
+#[test]
+fn audit_cycle_detected_exit2() {
+    let req = r#"{"commands":[{"id":"a","cmd":"echo a"},{"id":"b","cmd":"echo b"}],"dag":[{"from":"a","to":"b"},{"from":"b","to":"a"}]}"#;
+    let (code, out, _) = run_cli(&[], req);
+    assert_eq!(code, 2);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("cycle"), "{out}");
+    assert_eq!(v["results"].as_array().unwrap().len(), 0, "nothing ran");
+}
+
+// ---------- task 2 qol flags ----------
+
+#[test]
+fn list_dag_prints_dependency_graph() {
+    let req = r#"{"commands":[{"id":"a","cmd":"echo a"},{"id":"b","cmd":"echo b"},{"id":"c","cmd":"echo c"}],"dag":[{"from":"a","to":"b"},{"from":"a","to":"c"}]}"#;
+    let (code, out, _) = run_cli(&["--list-dag"], req);
+    assert_eq!(code, 0);
+    assert_eq!(
+        out,
+        "a\techo a\nb\techo b\t[after: a]\nc\techo c\t[after: a]\n"
+    );
+}
+
+#[test]
+fn timings_flag_adds_summary_table() {
+    let req = r#"{"steps":[{"cmd":"echo a"},{"cmd":"sleep 0.05 && echo b"}]}"#;
+    let (code, out, _) = run_cli(&["--timings"], req);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let timings = v["timings"].as_array().expect("timings field present");
+    assert_eq!(timings.len(), 2);
+    assert!(timings[0]["elapsed_ms"].is_u64());
+    // Without the flag the field must be absent.
+    let (code, out, _) = run_cli(&[], req);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v.get("timings").is_none());
+}
+
+#[test]
+fn hermes_tool_json_describes_request_precisely() {
+    let (code, out, _) = run_cli(&["--emit", "hermes-tool.json"], "");
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let input = &v["input"]["properties"];
+    // commands: capped at 50
+    assert_eq!(input["commands"]["maxItems"], serde_json::json!(50));
+    // concurrency: documented bounds and default
+    assert_eq!(input["concurrency"]["maximum"], serde_json::json!(50));
+    assert_eq!(input["concurrency"]["default"], serde_json::json!(6));
+    // timeout: documented default field + process-group kill semantics
+    let t = input["timeout_ms"]["description"].as_str().unwrap();
+    assert!(t.contains("SIGKILL"), "{t}");
+    assert_eq!(input["timeout_ms"]["default"], serde_json::json!(30000));
+    // dag: cycle/unknown-id rejection documented
+    let d = input["dag"]["description"].as_str().unwrap();
+    assert!(d.contains("Cycle"), "{d}");
+    // allow_dangerous: denylist enumerated
+    let a = input["allow_dangerous"]["description"].as_str().unwrap();
+    assert!(a.contains("rm -rf /"), "{a}");
+}

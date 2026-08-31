@@ -31,6 +31,14 @@ struct Cli {
     #[arg(long)]
     dry_run: bool,
 
+    /// Print the dependency graph as plain text (id <- deps) and exit.
+    #[arg(long)]
+    list_dag: bool,
+
+    /// Add a per-step timing table to the JSON summary ("timings" field).
+    #[arg(long)]
+    timings: bool,
+
     /// Output format: json (single object) or ndjson (streamed per step).
     #[arg(long, value_enum, default_value = "json")]
     output: OutputFormat,
@@ -69,22 +77,23 @@ fn hermes_tool_json() -> serde_json::Value {
                 },
                 "commands": {
                     "type": "array",
-                    "description": "Commands for a DAG; pair with `dag` edges. Independent commands run concurrently.",
+                    "maxItems": 50,
+                    "description": "DAG nodes. Independent commands run concurrently (bounded by `concurrency`); each `dag` edge makes `to` wait for `from` to complete first. Ids default to array index ('0','1',...).",
                     "items": { "$ref": "#/step" }
                 },
                 "dag": {
                     "type": "array",
-                    "description": "Dependency edges between command ids: `to` runs after `from` completes",
+                    "description": "Dependency edges between command ids: `to` runs only after `from` completes (regardless of `from`'s exit code). Cycles and unknown ids are rejected with exit 2.",
                     "items": {
                         "type": "object",
                         "required": ["from", "to"],
                         "properties": { "from": {"type": "string"}, "to": {"type": "string"} }
                     }
                 },
-                "concurrency": { "type": "integer", "description": "Max parallel branches (default 6, cap 50)" },
-                "timeout_ms": { "type": "integer", "description": "Default per-step timeout in ms (default 30000)" },
-                "keep_going": { "type": "boolean", "description": "Run independent branches after a failure (default false)" },
-                "allow_dangerous": { "type": "boolean", "description": "Permit denylisted destructive commands" }
+                "concurrency": { "type": "integer", "minimum": 1, "maximum": 50, "default": 6, "description": "Max branches executing in parallel. Queued steps wait on a semaphore; the batch never exceeds this many live child processes." },
+                "timeout_ms": { "type": "integer", "default": 30000, "description": "Default per-step timeout in ms. On expiry the step's whole process group is SIGKILLed, exit is reported as -1 with timeout:true. Override per step via step.timeout_ms." },
+                "keep_going": { "type": "boolean", "description": "Run independent branches after a failure (default false: on the first failure, all not-yet-scheduled steps are skipped and listed in `skipped`)" },
+                "allow_dangerous": { "type": "boolean", "description": "Permit denylisted destructive commands (rm -rf /, shutdown/reboot/halt/poweroff, init 0|6, mkfs*, dd of=/dev/*, forkbombs). Without it those requests exit 2 before anything runs." }
             }
         },
         "step": {
@@ -165,11 +174,51 @@ async fn run_batch_io(cli: &Cli) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    if cli.list_dag {
+        let (steps, edges) = shellaborate::validate(&req).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut deps: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut dedup: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for e in &edges {
+            if dedup.insert((e.from.clone(), e.to.clone())) {
+                deps.entry(e.to.clone()).or_default().push(e.from.clone());
+            }
+        }
+        for s in &steps {
+            let id = s.id.clone().unwrap_or_default();
+            let ds = deps.get(&id).cloned().unwrap_or_default();
+            if ds.is_empty() {
+                println!("{id}\t{}", s.cmd);
+            } else {
+                println!("{id}\t{}\t[after: {}]", s.cmd, ds.join(", "));
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
     match cli.output {
         OutputFormat::Json => {
             let resp = shellaborate::run_batch(&req).await?;
             let ok = resp.ok;
-            write_json(&serde_json::to_value(&resp)?, cli.pretty);
+            let mut value = serde_json::to_value(&resp)?;
+            if cli.timings {
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert(
+                        "timings".into(),
+                        serde_json::json!(
+                            resp.results
+                                .iter()
+                                .map(|r| serde_json::json!({
+                                    "id": r.id,
+                                    "elapsed_ms": r.elapsed_ms
+                                }))
+                                .collect::<Vec<_>>()
+                        ),
+                    );
+                }
+            }
+            write_json(&value, cli.pretty);
             Ok(if ok {
                 ExitCode::SUCCESS
             } else {
