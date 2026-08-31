@@ -1,14 +1,14 @@
 #!/bin/sh
 # recurlsively installer — POSIX, fail-closed.
 # Usage: curl -fsSL https://raw.githubusercontent.com/riceharvest/recurlsively/main/install.sh | sh
-# Override version: AGENTIC_SHELL_VERSION=v0.1.0 sh install.sh
+# Override version: SHELLABORATE_VERSION=v0.1.0 sh install.sh
 set -eu
 
-REPO="riceharvest/agentic-shell"
-BIN="agentic-shell"
-INSTALL_DIR="${AGENTIC_SHELL_INSTALL_DIR:-$HOME/.local/bin}"
+REPO="riceharvest/shellaborate"
+BIN="shellaborate"
+INSTALL_DIR="${SHELLABORATE_INSTALL_DIR:-$HOME/.local/bin}"
 
-log() { printf 'agentic-shell-installer: %s\n' "$1" >&2; }
+log() { printf 'shellaborate-installer: %s\n' "$1" >&2; }
 fail() { log "ERROR: $1"; exit 1; }
 
 command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 ||
@@ -50,13 +50,13 @@ esac
 
 TARGET="${arch_component}-${os_component}"
 
-if [ -n "${AGENTIC_SHELL_VERSION:-}" ]; then
-  VERSION="$AGENTIC_SHELL_VERSION"
+if [ -n "${SHELLABORATE_VERSION:-}" ]; then
+  VERSION="$SHELLABORATE_VERSION"
 else
   log "resolving latest release..."
   VERSION=$(fetch "https://api.github.com/repos/$REPO/releases/latest" |
     sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
-  [ -n "$VERSION" ] || fail "could not determine latest release (set AGENTIC_SHELL_VERSION to pin one)"
+  [ -n "$VERSION" ] || fail "could not determine latest release (set SHELLABORATE_VERSION to pin one)"
 fi
 
 BASE_URL="https://github.com/$REPO/releases/download/$VERSION"

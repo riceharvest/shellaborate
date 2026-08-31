@@ -1,7 +1,7 @@
 //! `agentic-shell --update` — self-update from GitHub Releases.
 
-const REPO: &str = "riceharvest/agentic-shell";
-const BIN: &str = "agentic-shell";
+const REPO: &str = "riceharvest/shellaborate";
+const BIN: &str = "shellaborate";
 
 #[derive(Debug)]
 pub enum UpdateError {

@@ -1,20 +1,20 @@
 [package]
-name = "agentic-shell"
+name = "shellaborate"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Batch shell: terminal + git + gh + execute_code + process in one DAG (terminal->terminal 71.9%, 99k). Pure Rust."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/riceharvest/agentic-shell"
+repository = "https://github.com/riceharvest/shellaborate"
 keywords = ["agentic","hermes","batch","tool"]
 categories = ["development-tools"]
 
 [[bin]]
-name = "agentic-shell"
+name = "shellaborate"
 path = "src/main.rs"
 
 [lib]
-name = "agentic_shell"
+name = "shellaborate"
 path = "src/lib.rs"
 
 [workspace]

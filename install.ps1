@@ -1,14 +1,14 @@
 # recurlsively installer for Windows — fail-closed.
-# Usage: irm https://raw.githubusercontent.com/riceharvest/agentic-shell/main/install.ps1 | iex
-# Override version: $env:AGENTIC_SHELL_VERSION = "v0.1.0"
+# Usage: irm https://raw.githubusercontent.com/riceharvest/shellaborate/main/install.ps1 | iex
+# Override version: $env:SHELLABORATE_VERSION = "v0.1.0"
 $ErrorActionPreference = "Stop"
 
-$Repo = "riceharvest/agentic-shell"
-$Bin = "agentic-shell"
-$InstallDir = if ($env:AGENTIC_SHELL_INSTALL_DIR) { $env:AGENTIC_SHELL_INSTALL_DIR } else { "$env:USERPROFILE\.local\bin" }
+$Repo = "riceharvest/shellaborate"
+$Bin = "shellaborate"
+$InstallDir = if ($env:SHELLABORATE_INSTALL_DIR) { $env:SHELLABORATE_INSTALL_DIR } else { "$env:USERPROFILE\.local\bin" }
 
 function Fail($message) {
-    Write-Error "agentic-shell-installer: ERROR: $message"
+    Write-Error "shellaborate-installer: ERROR: $message"
     exit 1
 }
 
@@ -26,15 +26,15 @@ switch ($Arch) {
 }
 
 # Version resolution.
-if ($env:AGENTIC_SHELL_VERSION) {
-    $Version = $env:AGENTIC_SHELL_VERSION
+if ($env:SHELLABORATE_VERSION) {
+    $Version = $env:SHELLABORATE_VERSION
 } else {
-    Write-Host "agentic-shell-installer: resolving latest release..."
+    Write-Host "shellaborate-installer: resolving latest release..."
     try {
         $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -ErrorAction Stop
         $Version = $Release.tag_name
     } catch {
-        Fail "could not determine latest release (set `$env:AGENTIC_SHELL_VERSION to pin one): $_"
+        Fail "could not determine latest release (set `$env:SHELLABORATE_VERSION to pin one): $_"
     }
 }
 if (-not $Version) { Fail "could not determine release version" }
@@ -45,7 +45,7 @@ $BaseUrl = "https://github.com/$Repo/releases/download/$Version"
 $Tmp = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP "recurlsively-install-$PID")
 
 try {
-    Write-Host "agentic-shell-installer: downloading $Version for $Target..."
+    Write-Host "shellaborate-installer: downloading $Version for $Target..."
     $ArchivePath = Join-Path $Tmp $Archive
     $ChecksumPath = Join-Path $Tmp "SHA256SUMS"
     try {
@@ -55,14 +55,14 @@ try {
         Fail "download failed: $_"
     }
 
-    Write-Host "agentic-shell-installer: verifying checksum..."
+    Write-Host "shellaborate-installer: verifying checksum..."
     $ExpectedLine = (Get-Content $ChecksumPath) | Where-Object { $_ -match [regex]::Escape($Archive) }
     if (-not $ExpectedLine) { Fail "no checksum found for $Archive" }
     $Expected = ($ExpectedLine -split '\s+')[0].ToLower()
     $Actual = (Get-FileHash -Path $ArchivePath -Algorithm SHA256).Hash.ToLower()
     if ($Actual -ne $Expected) { Fail "checksum mismatch: expected $Expected, got $Actual" }
 
-    Write-Host "agentic-shell-installer: extracting..."
+    Write-Host "shellaborate-installer: extracting..."
     Expand-Archive -Path $ArchivePath -DestinationPath $Tmp -Force
     $Binary = Join-Path $Tmp "$Bin-$ShortVersion-$Target" "$Bin.exe"
     if (-not (Test-Path $Binary)) { Fail "archive did not contain $Bin.exe" }
@@ -73,9 +73,9 @@ try {
     & (Join-Path $InstallDir "$Bin.exe") --version | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "installed binary failed to run --version" }
 
-    Write-Host "agentic-shell-installer: installed $Version to $InstallDir\$Bin.exe"
+    Write-Host "shellaborate-installer: installed $Version to $InstallDir\$Bin.exe"
     if ($env:PATH -notlike "*$InstallDir*") {
-        Write-Host "agentic-shell-installer: NOTE: $InstallDir is not on your PATH"
+        Write-Host "shellaborate-installer: NOTE: $InstallDir is not on your PATH"
     }
 } finally {
     Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
