@@ -441,3 +441,107 @@ fn hermes_tool_json_describes_request_precisely() {
     let a = input["allow_dangerous"]["description"].as_str().unwrap();
     assert!(a.contains("rm -rf /"), "{a}");
 }
+
+// ---------- artifact capture (option b) ----------
+
+#[test]
+fn capture_flag_collects_artifacts() {
+    // Step writes two files; --capture collects them with sha256 + inline.
+    let dir = tempfile::tempdir().unwrap();
+    let req = r#"{"steps":[{"cmd":"echo build ok > out.txt && echo v1 > out.ver"}]}"#;
+    let mut child = Command::new(bin())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .current_dir(dir.path())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(req.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let arts = v["artifacts"].as_array().expect("artifacts array present");
+    assert_eq!(arts.len(), 2);
+    let paths: Vec<&str> = arts.iter().map(|a| a["path"].as_str().unwrap()).collect();
+    assert!(
+        paths.contains(&"out.txt") && paths.contains(&"out.ver"),
+        "{paths:?}"
+    );
+    let txt = arts.iter().find(|a| a["path"] == "out.txt").unwrap();
+    assert_eq!(txt["content"], serde_json::json!("build ok\n"));
+    assert_eq!(txt["inlined"], serde_json::json!(true));
+    assert_eq!(txt["sha256"].as_str().unwrap().len(), 64);
+}
+
+#[test]
+fn capture_json_field_and_cli_flag_merge() {
+    // JSON capture spec + CLI --capture flag both apply; dedupe handles overlap.
+    let dir = tempfile::tempdir().unwrap();
+    let req =
+        r#"{"steps":[{"cmd":"echo a > f1.txt && echo b > f2.txt"}],"capture":[{"path":"f1.txt"}]}"#;
+    let mut child = Command::new(bin())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .current_dir(dir.path())
+        .args(["--capture", "f2.txt"])
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(req.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    let arts = v["artifacts"].as_array().unwrap();
+    assert_eq!(arts.len(), 2, "both files captured: {v}");
+}
+
+#[test]
+fn capture_traversal_via_cli_rejected() {
+    let req = r#"{"steps":[{"cmd":"echo x"}]}"#;
+    let (code, out, _) = run_cli(&["--capture", "../outside.txt"], req);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("traversal"), "{out}");
+}
+
+#[test]
+fn capture_works_on_failed_batch() {
+    // The whole point: failed run still returns the log for debugging.
+    let dir = tempfile::tempdir().unwrap();
+    let req = r#"{"steps":[{"cmd":"echo step1 > ok.log"},{"cmd":"exit 5"}],"capture":[{"path":"ok.log"}]}"#;
+    let mut child = Command::new(bin())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .current_dir(dir.path())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(req.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "step failure exits 1");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(v["ok"], serde_json::json!(false));
+    let arts = v["artifacts"]
+        .as_array()
+        .expect("artifacts present on failed batch");
+    assert_eq!(arts.len(), 1);
+    assert_eq!(arts[0]["content"], serde_json::json!("step1\n"));
+    }
+}

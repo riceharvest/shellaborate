@@ -54,6 +54,19 @@ pub struct Edge {
     pub to: String,
 }
 
+/// Artifact capture spec: files/globs to collect after the batch finishes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureSpec {
+    /// Glob pattern (e.g. "logs/*.txt", "build/report.md"), relative to the
+    /// invocation cwd (NOT each step's cwd — keeps scope predictable).
+    pub path: String,
+    /// Inline file content into the response if smaller than this many bytes
+    /// (default 64 KiB). Files past this are hash-only.
+    #[serde(default)]
+    pub inline_max_bytes: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct BatchRequest {
@@ -77,6 +90,9 @@ pub struct BatchRequest {
     /// Operator override for denylisted commands.
     #[serde(default)]
     pub allow_dangerous: bool,
+    /// Artifact capture specs (paths/globs relative to each step's cwd).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capture: Vec<CaptureSpec>,
 }
 
 impl BatchRequest {
@@ -132,8 +148,26 @@ pub struct BatchResponse {
     /// Steps never started because a dependency failed or the run cancelled.
     pub skipped: Vec<String>,
     pub elapsed_ms: u128,
+    /// Artifacts captured after the batch (only if capture specs were given).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<Vec<Artifact>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// A captured artifact: hash always, content inlined if small enough.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Artifact {
+    /// Path as matched by the glob (relative to invocation cwd).
+    pub path: String,
+    /// Absolute size in bytes.
+    pub size: u64,
+    pub sha256: String,
+    /// Inlined text content (only if size <= inline_max_bytes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// true if content was inlined; false = hash-only artifact.
+    pub inlined: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -871,13 +905,112 @@ pub async fn run_batch_streamed(
     let ok = !final_results.is_empty()
         && final_results.iter().all(|r| r.exit == 0)
         && skipped.is_empty();
+    let artifacts = if req.capture.is_empty() {
+        None
+    } else {
+        Some(capture_artifacts(&req.capture)?)
+    };
     Ok(BatchResponse {
         ok,
         results: final_results,
         skipped,
         elapsed_ms: started.elapsed().as_millis(),
+        artifacts,
         error: None,
     })
+}
+
+/// Default inline threshold: files below this are embedded in the response.
+pub const DEFAULT_INLINE_MAX_BYTES: usize = 64 * 1024;
+/// Hard cap on total inlined bytes across all artifacts (OOM bound).
+pub const MAX_TOTAL_INLINE_BYTES: usize = 8 * 1024 * 1024;
+/// Hard cap on matched files per capture run.
+pub const MAX_ARTIFACTS: usize = 200;
+
+/// Collect artifacts for the given specs: glob-expand, dedupe, sha256,
+/// inline small text files. Missing patterns are skipped silently (a build
+/// may legitimately not produce a report); traversal is rejected.
+pub fn capture_artifacts(specs: &[CaptureSpec]) -> Result<Vec<Artifact>> {
+    capture_artifacts_in(specs, &std::env::current_dir()?)
+}
+
+/// Same as `capture_artifacts` but with an explicit base directory (used by
+/// tests and by callers that must not touch process cwd).
+pub fn capture_artifacts_in(
+    specs: &[CaptureSpec],
+    base: &std::path::Path,
+) -> Result<Vec<Artifact>> {
+    use sha2::{Digest, Sha256};
+    let mut out: Vec<Artifact> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut total_inlined = 0usize;
+    for spec in specs {
+        // Traversal guard: reject patterns that try to escape the base dir.
+        let pattern = std::path::Path::new(&spec.path);
+        if pattern
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            anyhow::bail!(
+                "capture path {:?} contains '..' (path traversal rejected)",
+                spec.path
+            );
+        }
+        let base_pat = base.join(&spec.path);
+        let pat_str = base_pat.display().to_string();
+        let entries = match glob::glob(&pat_str) {
+            Ok(g) => g,
+            Err(e) => anyhow::bail!("capture pattern {:?} invalid: {e}", spec.path),
+        };
+        for entry in entries.flatten() {
+            // Report paths relative to the base dir for stable output.
+            let rel = entry
+                .strip_prefix(base)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| entry.display().to_string());
+            let path_str = rel;
+            if !seen.insert(path_str.clone()) {
+                continue; // dedupe across specs
+            }
+            let Ok(meta) = std::fs::metadata(&entry) else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue; // directories are not artifacts
+            }
+            let data = match std::fs::read(&entry) {
+                Ok(d) => d,
+                Err(e) => anyhow::bail!("capture read {} failed: {e}", path_str),
+            };
+            let mut h = Sha256::new();
+            h.update(&data);
+            let sha256 = format!("{:x}", h.finalize());
+            let inline_max = spec.inline_max_bytes.unwrap_or(DEFAULT_INLINE_MAX_BYTES);
+            let (content, inlined) = if data.len() <= inline_max
+                && total_inlined + data.len() <= MAX_TOTAL_INLINE_BYTES
+            {
+                total_inlined += data.len();
+                // Non-UTF8 files (e.g. binaries) are hash-only.
+                match String::from_utf8(data.clone()) {
+                    Ok(s) => (Some(s), true),
+                    Err(_) => (None, false),
+                }
+            } else {
+                (None, false)
+            };
+            out.push(Artifact {
+                path: path_str,
+                size: meta.len(),
+                sha256,
+                content,
+                inlined,
+            });
+            if out.len() >= MAX_ARTIFACTS {
+                return Ok(out);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Convenience wrapper with no streaming.
@@ -1247,5 +1380,109 @@ mod tests {
         };
         let resp = run_batch(&req).await.unwrap();
         assert_eq!(resp.results[0].stdout.as_deref(), Some("[]\n"));
+    }
+
+    // ---------- capture_artifacts ----------
+
+    fn spec(path: &str) -> CaptureSpec {
+        CaptureSpec {
+            path: path.to_owned(),
+            inline_max_bytes: None,
+        }
+    }
+
+    #[test]
+    fn capture_sha256_and_inline() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("report.txt"), "hello artifact").unwrap();
+        let arts = capture_artifacts_in(&[spec("report.txt")], dir.path()).unwrap();
+        assert_eq!(arts.len(), 1);
+        assert_eq!(arts[0].path, "report.txt");
+        assert_eq!(arts[0].size, 14);
+        use sha2::Digest as _;
+        assert_eq!(
+            arts[0].sha256,
+            format!("{:x}", sha2::Sha256::digest(b"hello artifact"))
+        );
+        assert_eq!(arts[0].content.as_deref(), Some("hello artifact"));
+        assert!(arts[0].inlined);
+    }
+
+    #[test]
+    fn capture_glob_and_dedupe() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("logs")).unwrap();
+        std::fs::write(dir.path().join("logs/a.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("logs/b.txt"), "b").unwrap();
+        let arts = capture_artifacts_in(
+            &[spec("logs/*.txt"), spec("logs/*.txt"), spec("logs/a.txt")],
+            dir.path(),
+        )
+        .unwrap();
+        // dedupe: overlapping specs must not duplicate files
+        assert_eq!(arts.len(), 2);
+        let paths: Vec<&str> = arts.iter().map(|a| a.path.as_str()).collect();
+        assert!(paths.contains(&"logs/a.txt") && paths.contains(&"logs/b.txt"));
+    }
+
+    #[test]
+    fn capture_inline_cap_and_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("big.txt"), "x".repeat(200)).unwrap();
+        std::fs::write(dir.path().join("bin.bin"), [0u8, 159, 146, 150]).unwrap();
+        let arts = capture_artifacts_in(
+            &[
+                CaptureSpec {
+                    path: "big.txt".into(),
+                    inline_max_bytes: Some(10),
+                },
+                spec("bin.bin"),
+            ],
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(arts.len(), 2);
+        let big = arts.iter().find(|a| a.path == "big.txt").unwrap();
+        assert!(
+            !big.inlined && big.content.is_none(),
+            "oversize must be hash-only"
+        );
+        let bin = arts.iter().find(|a| a.path == "bin.bin").unwrap();
+        assert!(
+            !bin.inlined && bin.content.is_none(),
+            "non-UTF8 must be hash-only"
+        );
+        assert_eq!(bin.sha256.len(), 64);
+    }
+
+    #[test]
+    fn capture_traversal_rejected() {
+        assert!(capture_artifacts(&[spec("../secrets.txt")]).is_err());
+        assert!(capture_artifacts(&[spec("a/../../etc/passwd")]).is_err());
+    }
+
+    #[test]
+    fn capture_missing_pattern_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let arts = capture_artifacts_in(&[spec("does-not-exist/*.log")], dir.path()).unwrap();
+        assert!(arts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn capture_runs_even_when_step_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().to_path_buf();
+        let req = BatchRequest {
+            steps: vec![step("echo log > keep.txt"), step("exit 3")],
+            capture: vec![spec("keep.txt")],
+            ..Default::default()
+        };
+        let resp = run_batch(&req).await.unwrap();
+        assert!(!resp.ok);
+        let arts = resp.artifacts.expect("artifacts present despite failure");
+        assert_eq!(arts.len(), 1);
+        assert_eq!(arts[0].path, "keep.txt");
+        assert_eq!(arts[0].content.as_deref(), Some("log\n"));
+        let _ = base; // base captured for clarity; run_batch uses process cwd
     }
 }

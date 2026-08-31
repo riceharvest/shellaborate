@@ -51,6 +51,12 @@ struct Cli {
     #[arg(long)]
     allow_dangerous: bool,
 
+    /// Capture artifacts after the batch: glob patterns relative to cwd.
+    /// Repeatable: --capture "logs/*.txt" --capture "build/report.md".
+    /// Files under 64KiB are inlined into the response; all get sha256.
+    #[arg(long, value_name = "GLOB")]
+    capture: Vec<String>,
+
     /// Emit a generated artifact and exit: hermes-tool.json, man, or a shell
     /// completion (bash/zsh/fish).
     #[arg(long, value_name = "TARGET")]
@@ -93,7 +99,19 @@ fn hermes_tool_json() -> serde_json::Value {
                 "concurrency": { "type": "integer", "minimum": 1, "maximum": 50, "default": 6, "description": "Max branches executing in parallel. Queued steps wait on a semaphore; the batch never exceeds this many live child processes." },
                 "timeout_ms": { "type": "integer", "default": 30000, "description": "Default per-step timeout in ms. On expiry the step's whole process group is SIGKILLed, exit is reported as -1 with timeout:true. Override per step via step.timeout_ms." },
                 "keep_going": { "type": "boolean", "description": "Run independent branches after a failure (default false: on the first failure, all not-yet-scheduled steps are skipped and listed in `skipped`)" },
-                "allow_dangerous": { "type": "boolean", "description": "Permit denylisted destructive commands (rm -rf /, shutdown/reboot/halt/poweroff, init 0|6, mkfs*, dd of=/dev/*, forkbombs). Without it those requests exit 2 before anything runs." }
+                "allow_dangerous": { "type": "boolean", "description": "Permit denylisted destructive commands (rm -rf /, shutdown/reboot/halt/poweroff, init 0|6, mkfs*, dd of=/dev/*, forkbombs). Without it those requests exit 2 before anything runs." },
+                "capture": {
+                    "type": "array",
+                    "description": "Artifact capture specs, applied after the batch finishes (works even when steps fail). Each spec: {path: glob pattern relative to invocation cwd, inline_max_bytes?: files below this size are inlined as text (default 65536, binaries are hash-only)}. Response gains an `artifacts` array: {path, size, sha256, content?, inlined}. Missing patterns are skipped silently; '..' in patterns is rejected.",
+                    "items": {
+                        "type": "object",
+                        "required": ["path"],
+                        "properties": {
+                            "path": { "type": "string" },
+                            "inline_max_bytes": { "type": "integer" }
+                        }
+                    }
+                }
             }
         },
         "step": {
@@ -164,6 +182,13 @@ async fn run_batch_io(cli: &Cli) -> anyhow::Result<ExitCode> {
         .map_err(|e| anyhow::anyhow!("invalid BatchRequest JSON: {e}"))?;
     // CLI flag wins over the JSON field.
     req.allow_dangerous = req.allow_dangerous || cli.allow_dangerous;
+    // CLI --capture flags append to any capture specs in the JSON.
+    for pat in &cli.capture {
+        req.capture.push(shellaborate::CaptureSpec {
+            path: pat.clone(),
+            inline_max_bytes: None,
+        });
+    }
 
     if cli.dry_run {
         let plan = shellaborate::plan(&req).map_err(|e| anyhow::anyhow!("{e}"))?;

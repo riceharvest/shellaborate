@@ -441,6 +441,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "h2"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1100,13 +1106,14 @@ dependencies = [
 
 [[package]]
 name = "shellaborate"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
  "clap_mangen",
  "flate2",
+ "glob",
  "libc",
  "reqwest",
  "serde",
